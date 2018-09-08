@@ -139,9 +139,13 @@ func NewStore(lg *zap.Logger, b backend.Backend, le lease.Lessor, ig ConsistentI
 	tx.Unlock()
 	s.b.ForceCommit()
 
-	if err := s.restore(); err != nil {
+	scheduledCompact, err := s.restore()
+	if err != nil {
 		// TODO: return the error instead of panic here?
 		panic("failed to recover store from backend")
+	}
+	if scheduledCompact != 0 {
+		s.Compact(scheduledCompact)
 	}
 
 	return s
@@ -302,7 +306,6 @@ func (s *store) Commit() {
 
 func (s *store) Restore(b backend.Backend) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	close(s.stopc)
 	s.fifoSched.Stop()
@@ -315,10 +318,16 @@ func (s *store) Restore(b backend.Backend) error {
 	s.fifoSched = schedule.NewFIFOScheduler()
 	s.stopc = make(chan struct{})
 
-	return s.restore()
+	scheduledCompact, err := s.restore()
+	s.mu.Unlock()
+
+	if err == nil && scheduledCompact != 0 {
+		s.Compact(scheduledCompact)
+	}
+	return err
 }
 
-func (s *store) restore() error {
+func (s *store) restore() (int64, error) {
 	b := s.b
 	reportDbTotalSizeInBytesMu.Lock()
 	reportDbTotalSizeInBytes = func() float64 { return float64(b.Size()) }
@@ -414,22 +423,7 @@ func (s *store) restore() error {
 
 	tx.Unlock()
 
-	if scheduledCompact != 0 {
-		s.Compact(scheduledCompact)
-
-		if s.lg != nil {
-			s.lg.Info(
-				"resume scheduled compaction",
-				zap.String("meta-bucket-name", string(metaBucketName)),
-				zap.String("meta-bucket-name-key", string(scheduledCompactKeyName)),
-				zap.Int64("scheduled-compact-revision", scheduledCompact),
-			)
-		} else {
-			plog.Printf("resume scheduled compaction at %d", scheduledCompact)
-		}
-	}
-
-	return nil
+	return scheduledCompact, nil
 }
 
 type revKeyValue struct {
